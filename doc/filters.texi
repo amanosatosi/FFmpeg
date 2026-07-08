@@ -23158,6 +23158,15 @@ To enable compilation of this filter you need to configure FFmpeg with
 libavformat to convert the passed subtitles file to ASS (Advanced Substation
 Alpha) subtitles format.
 
+This FFmpeg tree resolves libass through the normal @code{libass} pkg-config
+dependency. To build against libassmod/mangetsu, install
+@url{https://github.com/amanosatosi/libassmod} branch @code{mangetsu} into the
+prefix used for the FFmpeg build, or set @env{PKG_CONFIG_PATH} so
+@code{pkg-config --modversion libass} resolves to that installation before
+running FFmpeg @code{configure}. The public FFmpeg option remains
+@code{--enable-libass}. The included Forgejo CI workflow can install that
+dependency before configure when @env{INSTALL_LIBASSMOD_MANGETSU=1} is set.
+
 The filter accepts the following options:
 
 @table @option
@@ -23177,6 +23186,17 @@ These fonts will be used in addition to whatever the font provider uses.
 
 @item alpha
 Process alpha channel, by default alpha channel is untouched.
+
+@item mangetsu_rgba
+Select libassmod/mangetsu RGBA rendering. It accepts @code{auto}, @code{on},
+and @code{off}. The default is @code{auto}. Upstream libass builds ignore this
+path and continue to use the legacy @code{ASS_Image} renderer.
+
+@item mangetsu_actor_colorcoding
+Select libassmod/mangetsu actor colorcoding host feed behavior. It accepts
+@code{auto}, @code{on}, and @code{off}. The default is @code{auto}. Full ASS
+file parsing can be handled by libassmod itself; FFmpeg's decoded subtitle
+chunk path logs a debug message when no public host-feed API is available.
 
 @item charenc
 Set subtitles input character encoding. @code{subtitles} filter only. Only

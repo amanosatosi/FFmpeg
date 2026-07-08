@@ -35,6 +35,7 @@
 # include "libavcodec/codec_desc.h"
 # include "libavformat/avformat.h"
 #endif
+#include "libavutil/common.h"
 #include "libavutil/avstring.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
@@ -46,6 +47,18 @@
 #include "video.h"
 
 #define FF_ASS_FEATURE_WRAP_UNICODE     (LIBASS_VERSION >= 0x01600010)
+
+#if defined(LIBASSMOD_FEATURE_RGBA)
+#define FF_ASS_LIBASSMOD_RGBA 1
+#else
+#define FF_ASS_LIBASSMOD_RGBA 0
+#endif
+
+enum MangetsuAutoMode {
+    MANGETSU_MODE_AUTO = -1,
+    MANGETSU_MODE_OFF,
+    MANGETSU_MODE_ON,
+};
 
 typedef struct AssContext {
     const AVClass *class;
@@ -64,6 +77,8 @@ typedef struct AssContext {
     int shaping;
     FFDrawContext draw;
     int wrap_unicode;
+    int mangetsu_rgba;
+    int mangetsu_actor_colorcoding;
 } AssContext;
 
 #define OFFSET(x) offsetof(AssContext, x)
@@ -75,6 +90,14 @@ typedef struct AssContext {
     {"original_size",  "set the size of the original video (used to scale fonts)", OFFSET(original_w), AV_OPT_TYPE_IMAGE_SIZE, {.str = NULL},  0, 0, FLAGS }, \
     {"fontsdir",       "set the directory containing the fonts to read",           OFFSET(fontsdir),   AV_OPT_TYPE_STRING,     {.str = NULL},  0, 0, FLAGS }, \
     {"alpha",          "enable processing of alpha channel",                       OFFSET(alpha),      AV_OPT_TYPE_BOOL,       {.i64 = 0   },         0,        1, FLAGS }, \
+    {"mangetsu_rgba",  "select libassmod/mangetsu RGBA rendering", OFFSET(mangetsu_rgba), AV_OPT_TYPE_INT, {.i64 = MANGETSU_MODE_AUTO}, MANGETSU_MODE_AUTO, MANGETSU_MODE_ON, FLAGS, .unit = "mangetsu_rgba" }, \
+        {"auto",       "use RGBA rendering when libassmod reports it is needed", 0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_AUTO}, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_rgba" }, \
+        {"off",        "disable RGBA rendering",                                 0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_OFF }, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_rgba" }, \
+        {"on",         "force RGBA rendering when available",                    0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_ON  }, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_rgba" }, \
+    {"mangetsu_actor_colorcoding", "select libassmod/mangetsu actor colorcoding host feed", OFFSET(mangetsu_actor_colorcoding), AV_OPT_TYPE_INT, {.i64 = MANGETSU_MODE_AUTO}, MANGETSU_MODE_AUTO, MANGETSU_MODE_ON, FLAGS, .unit = "mangetsu_actor_colorcoding" }, \
+        {"auto",       "use host feed when a public libassmod API is available", 0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_AUTO}, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_actor_colorcoding" }, \
+        {"off",        "disable actor colorcoding host feed",                    0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_OFF }, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_actor_colorcoding" }, \
+        {"on",         "attempt actor colorcoding host feed and warn if unavailable", 0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_ON  }, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_actor_colorcoding" }, \
 
 /* libass supports a log level ranging from 0 to 7 */
 static const int ass_libavfilter_log_level_map[] = {
@@ -146,6 +169,7 @@ static int query_formats(AVFilterContext *ctx)
 static int config_input(AVFilterLink *inlink)
 {
     AssContext *ass = inlink->dst->priv;
+    AVFilterContext *ctx = inlink->dst;
 
     ff_draw_init2(&ass->draw, inlink->format, inlink->colorspace, inlink->color_range,
                   ass->alpha ? FF_DRAW_PROCESS_ALPHA : 0);
@@ -160,6 +184,12 @@ static int config_input(AVFilterLink *inlink)
 
     if (ass->shaping != -1)
         ass_set_shaper(ass->renderer, ass->shaping);
+
+    av_log(ctx, AV_LOG_VERBOSE, "libass version: 0x%08x; mangetsu RGBA API: %s; mode: %s\n",
+           ass_library_version(),
+           FF_ASS_LIBASSMOD_RGBA ? "available" : "unavailable",
+           ass->mangetsu_rgba == MANGETSU_MODE_ON  ? "on" :
+           ass->mangetsu_rgba == MANGETSU_MODE_OFF ? "off" : "auto");
 
     return 0;
 }
@@ -185,20 +215,149 @@ static void overlay_ass_image(AssContext *ass, AVFrame *picref,
     }
 }
 
+#if FF_ASS_LIBASSMOD_RGBA
+static void overlay_mangetsu_rgba_image(AssContext *ass, AVFrame *picref,
+                                        const ASS_ImageRGBA *image)
+{
+    for (; image; image = image->next) {
+        const int x_start = av_clip(image->dst_x, 0, picref->width);
+        const int y_start = av_clip(image->dst_y, 0, picref->height);
+        const int x_end   = av_clip(image->dst_x + image->w, 0, picref->width);
+        const int y_end   = av_clip(image->dst_y + image->h, 0, picref->height);
+
+        for (int y = y_start; y < y_end; y++) {
+            const uint8_t *src = image->rgba + (y - image->dst_y) * image->stride +
+                                 (x_start - image->dst_x) * 4;
+
+            for (int x = x_start; x < x_end; x++, src += 4) {
+                uint8_t rgba_color[4];
+                FFDrawColor color;
+                const unsigned alpha = src[3];
+
+                if (!alpha)
+                    continue;
+
+                rgba_color[3] = alpha;
+                if (alpha == 255) {
+                    rgba_color[0] = src[0];
+                    rgba_color[1] = src[1];
+                    rgba_color[2] = src[2];
+                } else {
+                    rgba_color[0] = FFMIN(255, (src[0] * 255 + alpha / 2) / alpha);
+                    rgba_color[1] = FFMIN(255, (src[1] * 255 + alpha / 2) / alpha);
+                    rgba_color[2] = FFMIN(255, (src[2] * 255 + alpha / 2) / alpha);
+                }
+
+                ff_draw_color(&ass->draw, &color, rgba_color);
+                ff_blend_rectangle(&ass->draw, &color,
+                                   picref->data, picref->linesize,
+                                   picref->width, picref->height,
+                                   x, y, 1, 1);
+            }
+        }
+    }
+}
+#endif
+
+static void log_mangetsu_actor_colorcoding(AVFilterContext *ctx, int full_ass_parser)
+{
+    AssContext *ass = ctx->priv;
+
+    if (ass->mangetsu_actor_colorcoding == MANGETSU_MODE_OFF) {
+        av_log(ctx, AV_LOG_DEBUG, "mangetsu actor colorcoding host feed disabled\n");
+        return;
+    }
+
+    /*
+     * The current public mangetsu header exposes renderer-side storage for
+     * actor colorcoding, but no host-feed function. Full ASS parsing can load
+     * top Comment metadata internally; chunk-based subtitle decoding cannot.
+     */
+    if (full_ass_parser) {
+        av_log(ctx, AV_LOG_VERBOSE,
+               "mangetsu actor colorcoding: full ASS parser path active; host feed not attempted\n");
+        return;
+    }
+
+    av_log(ctx, ass->mangetsu_actor_colorcoding == MANGETSU_MODE_ON ?
+           AV_LOG_WARNING : AV_LOG_DEBUG,
+           "mangetsu actor colorcoding host feed unavailable in public libassmod API\n");
+}
+
+static int render_mangetsu_rgba_or_fallback(AVFilterContext *ctx, AVFrame *picref,
+                                            double time_ms, int *detect_change)
+{
+    AssContext *ass = ctx->priv;
+
+#if FF_ASS_LIBASSMOD_RGBA
+    ASS_RenderResult result = { 0 };
+    int use_rgba;
+
+    if (ass->mangetsu_rgba == MANGETSU_MODE_OFF) {
+        ASS_Image *image = ass_render_frame(ass->renderer, ass->track,
+                                            time_ms, detect_change);
+        av_log(ctx, AV_LOG_DEBUG,
+               "mangetsu RGBA path disabled; using ASS_Image fallback at pts_ms:%f detect_change:%d\n",
+               time_ms, *detect_change);
+        overlay_ass_image(ass, picref, image);
+        return 0;
+    }
+
+    result = ass_render_frame_compat(ass->renderer, ass->track,
+                                     time_ms, detect_change);
+    use_rgba = result.use_rgba && result.imgs_rgba;
+
+    if (ass->mangetsu_rgba == MANGETSU_MODE_ON && !result.imgs_rgba) {
+        ass_render_result_free(&result);
+        av_log(ctx, AV_LOG_WARNING,
+               "mangetsu RGBA render returned no RGBA images at pts_ms:%f; falling back to ASS_Image\n",
+               time_ms);
+        result.imgs = ass_render_frame(ass->renderer, ass->track,
+                                       time_ms, detect_change);
+        use_rgba = 0;
+    } else if (ass->mangetsu_rgba == MANGETSU_MODE_ON) {
+        use_rgba = 1;
+    }
+
+    av_log(ctx, AV_LOG_DEBUG,
+           "mangetsu render pts_ms:%f detect_change:%d track_has_rgba:%d frame_needs_rgba:%d path:%s\n",
+           time_ms, *detect_change, ass_track_has_rgba(ass->track),
+           ass_frame_needs_rgba(ass->renderer), use_rgba ? "RGBA" : "ASS_Image");
+
+    if (use_rgba)
+        overlay_mangetsu_rgba_image(ass, picref, result.imgs_rgba);
+    else
+        overlay_ass_image(ass, picref, result.imgs);
+
+    ass_render_result_free(&result);
+    return 0;
+#else
+    ASS_Image *image;
+
+    if (ass->mangetsu_rgba == MANGETSU_MODE_ON)
+        av_log(ctx, AV_LOG_WARNING,
+               "mangetsu RGBA requested, but this libass header has no RGBA API; using ASS_Image fallback\n");
+
+    image = ass_render_frame(ass->renderer, ass->track, time_ms, detect_change);
+    av_log(ctx, AV_LOG_DEBUG,
+           "mangetsu RGBA API unavailable; using ASS_Image fallback at pts_ms:%f detect_change:%d\n",
+           time_ms, *detect_change);
+    overlay_ass_image(ass, picref, image);
+    return 0;
+#endif
+}
+
 static int filter_frame(AVFilterLink *inlink, AVFrame *picref)
 {
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
-    AssContext *ass = ctx->priv;
     int detect_change = 0;
     double time_ms = picref->pts * av_q2d(inlink->time_base) * 1000;
-    ASS_Image *image = ass_render_frame(ass->renderer, ass->track,
-                                        time_ms, &detect_change);
+
+    render_mangetsu_rgba_or_fallback(ctx, picref, time_ms, &detect_change);
 
     if (detect_change)
         av_log(ctx, AV_LOG_DEBUG, "Change happened at time ms:%f\n", time_ms);
-
-    overlay_ass_image(ass, picref, image);
 
     return ff_filter_frame(outlink, picref);
 }
@@ -244,6 +403,7 @@ static av_cold int init_ass(AVFilterContext *ctx)
                ass->filename);
         return AVERROR(EINVAL);
     }
+    log_mangetsu_actor_colorcoding(ctx, 1);
     return 0;
 }
 
@@ -470,6 +630,7 @@ static av_cold int init_subtitles(AVFilterContext *ctx)
         ass_process_codec_private(ass->track,
                                   dec_ctx->subtitle_header,
                                   dec_ctx->subtitle_header_size);
+    log_mangetsu_actor_colorcoding(ctx, 0);
     while (av_read_frame(fmt, &pkt) >= 0) {
         int i, got_subtitle;
         AVSubtitle sub = {0};

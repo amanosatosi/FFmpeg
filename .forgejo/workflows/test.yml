@@ -28,6 +28,10 @@ jobs:
         uses: actions/checkout@v4
       - name: Configure
         run: |
+          if [ "${INSTALL_LIBASSMOD_MANGETSU:-0}" = 1 ]; then
+              sh tools/install-libassmod-mangetsu.sh "$PWD/libassmod-prefix"
+              export PKG_CONFIG_PATH="$PWD/libassmod-prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          fi
           ./configure --enable-gpl --enable-nonfree --enable-memory-poisoning --assert-level=2 \
               $([ "${{ matrix.bits }}" != "32" ] || echo --arch=x86_32 --extra-cflags=-m32 --extra-cxxflags=-m32 --extra-ldflags=-m32) \
               $([ "${{ matrix.shared }}" != "shared" ] || echo --enable-shared --disable-static) \
@@ -70,6 +74,10 @@ jobs:
         uses: actions/checkout@v4
       - name: Configure
         run: |
+          if [ "${INSTALL_LIBASSMOD_MANGETSU:-0}" = 1 ]; then
+              sh tools/install-libassmod-mangetsu.sh "$PWD/libassmod-prefix"
+              export PKG_CONFIG_PATH="$PWD/libassmod-prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          fi
           ./configure --pkg-config-flags="--static" $FFBUILD_TARGET_FLAGS $FF_CONFIGURE \
               --cc="$CC" --cxx="$CXX" --ar="$AR" --ranlib="$RANLIB" --nm="$NM" \
               --extra-cflags="$FF_CFLAGS" --extra-cxxflags="$FF_CXXFLAGS" \
