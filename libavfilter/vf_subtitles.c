@@ -54,6 +54,12 @@
 #define FF_ASS_LIBASSMOD_RGBA 0
 #endif
 
+#if defined(LIBASSMOD_FEATURE_BLEND_BGRA)
+#define FF_ASS_LIBASSMOD_BLEND_BGRA 1
+#else
+#define FF_ASS_LIBASSMOD_BLEND_BGRA 0
+#endif
+
 enum MangetsuAutoMode {
     MANGETSU_MODE_AUTO = -1,
     MANGETSU_MODE_OFF,
@@ -79,6 +85,7 @@ typedef struct AssContext {
     int wrap_unicode;
     int mangetsu_rgba;
     int mangetsu_actor_colorcoding;
+    int mangetsu_blend;
 } AssContext;
 
 #define OFFSET(x) offsetof(AssContext, x)
@@ -98,6 +105,10 @@ typedef struct AssContext {
         {"auto",       "use host feed when a public libassmod API is available", 0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_AUTO}, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_actor_colorcoding" }, \
         {"off",        "disable actor colorcoding host feed",                    0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_OFF }, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_actor_colorcoding" }, \
         {"on",         "attempt actor colorcoding host feed and warn if unavailable", 0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_ON  }, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_actor_colorcoding" }, \
+    {"mangetsu_blend", "select libassmod/mangetsu destination-aware blend composition", OFFSET(mangetsu_blend), AV_OPT_TYPE_INT, {.i64 = MANGETSU_MODE_AUTO}, MANGETSU_MODE_AUTO, MANGETSU_MODE_ON, FLAGS, .unit = "mangetsu_blend" }, \
+        {"auto",       "use destination-aware blend composition when available", 0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_AUTO}, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_blend" }, \
+        {"off",        "disable destination-aware blend composition",             0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_OFF }, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_blend" }, \
+        {"on",         "require destination-aware blend composition",             0, AV_OPT_TYPE_CONST, {.i64 = MANGETSU_MODE_ON  }, INT_MIN, INT_MAX, FLAGS, .unit = "mangetsu_blend" }, \
 
 /* libass supports a log level ranging from 0 to 7 */
 static const int ass_libavfilter_log_level_map[] = {
@@ -163,6 +174,19 @@ static av_cold void uninit(AVFilterContext *ctx)
 
 static int query_formats(AVFilterContext *ctx)
 {
+    AssContext *ass = ctx->priv;
+
+#if FF_ASS_LIBASSMOD_BLEND_BGRA
+    if (ass->mangetsu_blend != MANGETSU_MODE_OFF &&
+        ass->mangetsu_rgba != MANGETSU_MODE_OFF) {
+        static const int mangetsu_blend_formats[] = {
+            AV_PIX_FMT_BGRA,
+            AV_PIX_FMT_NONE,
+        };
+        return ff_set_common_formats_from_list(ctx, mangetsu_blend_formats);
+    }
+#endif
+
     return ff_set_common_formats(ctx, ff_draw_supported_pixel_formats(0));
 }
 
@@ -170,6 +194,29 @@ static int config_input(AVFilterLink *inlink)
 {
     AssContext *ass = inlink->dst->priv;
     AVFilterContext *ctx = inlink->dst;
+
+#if !FF_ASS_LIBASSMOD_BLEND_BGRA
+    if (ass->mangetsu_blend == MANGETSU_MODE_ON) {
+        av_log(ctx, AV_LOG_ERROR,
+               "mangetsu_blend=on requested, but this libass header has no destination-aware BGRA compositor API\n");
+        return AVERROR(ENOSYS);
+    }
+#else
+    if (ass->mangetsu_blend == MANGETSU_MODE_ON &&
+        ass->mangetsu_rgba == MANGETSU_MODE_OFF) {
+        av_log(ctx, AV_LOG_ERROR,
+               "mangetsu_blend=on requires Mangetsu RGBA rendering; mangetsu_rgba=off is incompatible\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (ass->mangetsu_blend != MANGETSU_MODE_OFF &&
+        ass->mangetsu_rgba != MANGETSU_MODE_OFF &&
+        inlink->format != AV_PIX_FMT_BGRA) {
+        av_log(ctx, AV_LOG_ERROR,
+               "Mangetsu destination-aware blend composition requires a BGRA input frame\n");
+        return AVERROR(EINVAL);
+    }
+#endif
 
     ff_draw_init2(&ass->draw, inlink->format, inlink->colorspace, inlink->color_range,
                   ass->alpha ? FF_DRAW_PROCESS_ALPHA : 0);
@@ -185,11 +232,15 @@ static int config_input(AVFilterLink *inlink)
     if (ass->shaping != -1)
         ass_set_shaper(ass->renderer, ass->shaping);
 
-    av_log(ctx, AV_LOG_VERBOSE, "libass version: 0x%08x; mangetsu RGBA API: %s; mode: %s\n",
+    av_log(ctx, AV_LOG_VERBOSE,
+           "libass version: 0x%08x; mangetsu RGBA API: %s; mode: %s; blend BGRA API: %s; mode: %s\n",
            ass_library_version(),
            FF_ASS_LIBASSMOD_RGBA ? "available" : "unavailable",
            ass->mangetsu_rgba == MANGETSU_MODE_ON  ? "on" :
-           ass->mangetsu_rgba == MANGETSU_MODE_OFF ? "off" : "auto");
+           ass->mangetsu_rgba == MANGETSU_MODE_OFF ? "off" : "auto",
+           FF_ASS_LIBASSMOD_BLEND_BGRA ? "available" : "unavailable",
+           ass->mangetsu_blend == MANGETSU_MODE_ON  ? "on" :
+           ass->mangetsu_blend == MANGETSU_MODE_OFF ? "off" : "auto");
 
     return 0;
 }
@@ -256,6 +307,57 @@ static void overlay_mangetsu_rgba_image(AssContext *ass, AVFrame *picref,
             }
         }
     }
+}
+
+static int composite_mangetsu_rgba_image(AVFilterContext *ctx, AVFrame *picref,
+                                         ASS_ImageRGBA *image)
+{
+    AssContext *ass = ctx->priv;
+
+#if FF_ASS_LIBASSMOD_BLEND_BGRA
+    if (ass->mangetsu_blend != MANGETSU_MODE_OFF) {
+        uint8_t *saved_alpha;
+        int ret;
+
+        if (picref->format != AV_PIX_FMT_BGRA) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "Mangetsu destination-aware blend composition received a non-BGRA frame\n");
+            return AVERROR(EINVAL);
+        }
+
+        saved_alpha = av_malloc_array((size_t) picref->width, (size_t) picref->height);
+        if (!saved_alpha)
+            return AVERROR(ENOMEM);
+
+        for (int y = 0; y < picref->height; y++) {
+            const uint8_t *row = picref->data[0] + (ptrdiff_t) y * picref->linesize[0];
+            for (int x = 0; x < picref->width; x++)
+                saved_alpha[(size_t) y * picref->width + x] = row[4 * x + 3];
+        }
+
+        ret = ass_composite_images_bgra(image, picref->data[0],
+                                        picref->width, picref->height,
+                                        picref->linesize[0]);
+
+        for (int y = 0; y < picref->height; y++) {
+            uint8_t *row = picref->data[0] + (ptrdiff_t) y * picref->linesize[0];
+            for (int x = 0; x < picref->width; x++)
+                row[4 * x + 3] = saved_alpha[(size_t) y * picref->width + x];
+        }
+        av_free(saved_alpha);
+
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "Mangetsu destination-aware blend compositor rejected the RGBA image list\n");
+            return AVERROR(EINVAL);
+        }
+
+        return 0;
+    }
+#endif
+
+    overlay_mangetsu_rgba_image(ass, picref, image);
+    return 0;
 }
 #endif
 
@@ -324,11 +426,13 @@ static int render_mangetsu_rgba_or_fallback(AVFilterContext *ctx, AVFrame *picre
            time_ms, *detect_change, ass_track_has_rgba(ass->track),
            ass_frame_needs_rgba(ass->renderer), use_rgba ? "RGBA" : "ASS_Image");
 
-    if (use_rgba)
-        overlay_mangetsu_rgba_image(ass, picref, result.imgs_rgba);
-    else
-        overlay_ass_image(ass, picref, result.imgs);
+    if (use_rgba) {
+        int ret = composite_mangetsu_rgba_image(ctx, picref, result.imgs_rgba);
+        ass_render_result_free(&result);
+        return ret;
+    }
 
+    overlay_ass_image(ass, picref, result.imgs);
     ass_render_result_free(&result);
     return 0;
 #else
@@ -352,9 +456,14 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref)
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
     int detect_change = 0;
+    int ret;
     double time_ms = picref->pts * av_q2d(inlink->time_base) * 1000;
 
-    render_mangetsu_rgba_or_fallback(ctx, picref, time_ms, &detect_change);
+    ret = render_mangetsu_rgba_or_fallback(ctx, picref, time_ms, &detect_change);
+    if (ret < 0) {
+        av_frame_free(&picref);
+        return ret;
+    }
 
     if (detect_change)
         av_log(ctx, AV_LOG_DEBUG, "Change happened at time ms:%f\n", time_ms);
@@ -531,7 +640,7 @@ static av_cold int init_subtitles(AVFilterContext *ctx)
         if (st->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT &&
             attachment_is_font(st)) {
             const AVDictionaryEntry *tag = NULL;
-            tag = av_dict_get(st->metadata, "filename", NULL,
+            tag = av_dict_get(st->metadata, "mimetype", NULL,
                               AV_DICT_MATCH_CASE);
 
             if (tag) {
