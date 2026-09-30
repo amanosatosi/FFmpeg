@@ -640,7 +640,7 @@ static av_cold int init_subtitles(AVFilterContext *ctx)
         if (st->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT &&
             attachment_is_font(st)) {
             const AVDictionaryEntry *tag = NULL;
-            tag = av_dict_get(st->metadata, "mimetype", NULL,
+            tag = av_dict_get(st->metadata, "filename", NULL,
                               AV_DICT_MATCH_CASE);
 
             if (tag) {
