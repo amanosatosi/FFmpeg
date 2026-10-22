@@ -221,7 +221,7 @@ static int query_formats(const AVFilterContext *ctx,
     const AssContext *ass = ctx->priv;
     if (ass->mangetsu_blend != MANGETSU_MODE_OFF &&
         ass->mangetsu_rgba != MANGETSU_MODE_OFF) {
-        static const enum AVPixelFormat formats[] = { AV_PIX_FMT_BGRA, AV_PIX_FMT_NONE };
+        static const int formats[] = { AV_PIX_FMT_BGRA, AV_PIX_FMT_NONE };
         return ff_set_common_formats_from_list2(ctx, cfg_in, cfg_out, formats);
     }
 #endif
