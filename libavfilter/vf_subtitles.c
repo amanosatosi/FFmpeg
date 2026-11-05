@@ -777,6 +777,35 @@ static av_cold int init_subtitles(AVFilterContext *ctx)
         ass_set_style_overrides(ass->library, list);
         av_free(list);
     }
+    /*
+     * Native external ASS files must be loaded as complete scripts. Demuxing
+     * them into codec-private headers and subtitle packets drops Comment
+     * events, including Mangetsu style defaults and Actor Colorcoding.
+     *
+     * Keep the packet decoder for Matroska and other container inputs:
+     * ass_read_file() must not be used on their container filenames.
+     */
+    if (st->codecpar->codec_id == AV_CODEC_ID_ASS &&
+        fmt->iformat && !strcmp(fmt->iformat->name, "ass")) {
+        ASS_Track *full_track = ass_read_file(ass->library, ass->filename,
+                                              ass->charenc);
+        if (!full_track) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "Failed to load complete external ASS script '%s'\n",
+                   ass->filename);
+            ret = AVERROR_INVALIDDATA;
+            goto end;
+        }
+
+        ass_free_track(ass->track);
+        ass->track = full_track;
+        log_mangetsu_actor_colorcoding(ctx, 1);
+        av_log(ctx, AV_LOG_VERBOSE,
+               "Loaded external ASS through full script parser (Mangetsu style metadata preserved)\n");
+        ret = 0;
+        goto end;
+    }
+
     /* Decode subtitles and push them into the renderer (libass) */
     if (dec_ctx->subtitle_header)
         ass_process_codec_private(ass->track,
