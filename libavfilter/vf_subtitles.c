@@ -791,7 +791,7 @@ static av_cold int init_subtitles(AVFilterContext *ctx)
                                               ass->charenc);
         if (!full_track) {
             av_log(ctx, AV_LOG_ERROR,
-                   "Failed to load complete external ASS script '%s'\\n",
+                   "Failed to load complete external ASS script '%s'\n",
                    ass->filename);
             ret = AVERROR_INVALIDDATA;
             goto end;
@@ -801,7 +801,7 @@ static av_cold int init_subtitles(AVFilterContext *ctx)
         ass->track = full_track;
         log_mangetsu_actor_colorcoding(ctx, 1);
         av_log(ctx, AV_LOG_VERBOSE,
-               "Loaded external ASS through full script parser (Mangetsu style metadata preserved)\\n");
+               "Loaded external ASS through full script parser (Mangetsu style metadata preserved)\n");
         ret = 0;
         goto end;
     }
